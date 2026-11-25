@@ -86,11 +86,12 @@
       return String(v).trim();
     };
 
+    // Mantém o padrão do cliente: N/A
     const normAnswer = (v) => {
       const s = String(v || "").trim();
       const u = s.toUpperCase();
       if (!s) return "";
-      if (u === "N/A" || u === "NA" || u === "N.A" || u === "N.A.") return "N.A";
+      if (u === "N/A" || u === "NA" || u === "N.A" || u === "N.A.") return "N/A";
       if (u === "NAO" || u === "NÃO") return "Nao";
       if (u === "SIM") return "Sim";
       return s;
@@ -106,6 +107,18 @@
         if (hit) return colMap[hit];
       }
       return null;
+    };
+
+    // Fórmula de critério composto (2 sub-métricas) retornando N/A
+    const buildPairFormula = (colA, colB, r) =>
+      `IF(OR(${colA}${r}="Nao",${colA}${r}="Não",${colB}${r}="Nao",${colB}${r}="Não"),"Não",IF(OR(${colA}${r}="Sim",${colB}${r}="Sim"),"Sim","N/A"))`;
+
+    // Fórmula de total por bloco redistribuindo peso para N/A (e tolerando N.A / NA)
+    const buildScoreFormula = (cols, r) => {
+      const valid = cols.map(c => `(${c}${r}<>"N/A")*(${c}${r}<>"N.A")*(${c}${r}<>"NA")*$${c}$2`).join("+");
+      const hits  = cols.map(c => `(${c}${r}="Sim")*$${c}$2`).join("+");
+      const totalWeight = `SUM(${cols.map(c => `$${c}$2`).join(",")})`;
+      return `IF((${valid})=0,0,${totalWeight}*(${hits})/(${valid}))`;
     };
 
     function setupDrop(dropId, inputId, lblId, onFile) {
@@ -273,103 +286,3 @@
         const tplHeight = tplRow.height;
         const tplStyles = [];
         for (let c = 1; c <= 41; c++) {
-          tplStyles[c] = JSON.parse(JSON.stringify(tplRow.getCell(c).style || {}));
-        }
-
-        // Remove linhas antigas (da linha 4 em diante) para evitar restos de "Sim"
-        if (ws.rowCount >= 4) {
-          ws.spliceRows(4, ws.rowCount - 3);
-        }
-
-        records.forEach((rec, i) => {
-          const r = 4 + i;
-          const row = ws.getRow(r);
-          if (tplHeight) row.height = tplHeight;
-
-          for (let c = 1; c <= 41; c++) {
-            row.getCell(c).style = JSON.parse(JSON.stringify(tplStyles[c]));
-          }
-
-          row.getCell(1).value = rec.avaliador;
-          row.getCell(2).value = rec.idChamada;
-          row.getCell(3).value = rec.user;
-          row.getCell(4).value = rec.servico;
-          row.getCell(5).value = rec.marca;
-
-          // Comunicação
-          row.getCell(6).value = rec.apresentacao;
-          row.getCell(7).value = rec.idInterlocutor;
-          row.getCell(8).value = { formula: `IF(OR(F${r}="Nao",G${r}="Nao"),"Não",IF(OR(F${r}="Sim",G${r}="Sim"),"Sim","N.A"))` };
-          row.getCell(9).value = rec.personalizacao;
-          row.getCell(10).value = rec.linguagem;
-          row.getCell(11).value = rec.naoInterrompe;
-          row.getCell(12).value = rec.despedida;
-          row.getCell(13).value = {
-            formula: `IF(((H${r}<>"N.A")*$H$2+(I${r}<>"N.A")*$I$2+(J${r}<>"N.A")*$J$2+(K${r}<>"N.A")*$K$2+(L${r}<>"N.A")*$L$2)=0,0,SUM($H$2:$L$2)*((H${r}="Sim")*$H$2+(I${r}="Sim")*$I$2+(J${r}="Sim")*$J$2+(K${r}="Sim")*$K$2+(L${r}="Sim")*$L$2)/((H${r}<>"N.A")*$H$2+(I${r}<>"N.A")*$I$2+(J${r}<>"N.A")*$J$2+(K${r}<>"N.A")*$K$2+(L${r}<>"N.A")*$L$2))`
-          };
-
-          // Eficácia
-          row.getCell(14).value = rec.hold;
-          row.getCell(15).value = rec.agradeceHold;
-          row.getCell(16).value = { formula: `IF(OR(N${r}="Nao",O${r}="Nao"),"Não",IF(OR(N${r}="Sim",O${r}="Sim"),"Sim","N.A"))` };
-          row.getCell(17).value = rec.responde;
-          row.getCell(18).value = rec.escuta;
-          row.getCell(19).value = { formula: `IF(OR(Q${r}="Nao",R${r}="Nao"),"Não",IF(OR(Q${r}="Sim",R${r}="Sim"),"Sim","N.A"))` };
-          row.getCell(20).value = rec.transfere;
-          row.getCell(21).value = rec.emocoes;
-          row.getCell(22).value = rec.maisAjuda;
-          row.getCell(23).value = {
-            formula: `IF(((P${r}<>"N.A")*$P$2+(S${r}<>"N.A")*$S$2+(T${r}<>"N.A")*$T$2+(U${r}<>"N.A")*$U$2+(V${r}<>"N.A")*$V$2)=0,0,SUM($P$2,$S$2,$T$2,$U$2,$V$2)*((P${r}="Sim")*$P$2+(S${r}="Sim")*$S$2+(T${r}="Sim")*$T$2+(U${r}="Sim")*$U$2+(V${r}="Sim")*$V$2)/((P${r}<>"N.A")*$P$2+(S${r}<>"N.A")*$S$2+(T${r}<>"N.A")*$T$2+(U${r}<>"N.A")*$U$2+(V${r}<>"N.A")*$V$2))`
-          };
-
-          // Procedimentos
-          row.getCell(24).value = rec.validacao;
-          row.getCell(25).value = rec.email;
-          row.getCell(26).value = rec.telefone;
-          row.getCell(27).value = { formula: `IF(OR(Y${r}="Nao",Z${r}="Nao"),"Não",IF(OR(Y${r}="Sim",Z${r}="Sim"),"Sim","N.A"))` };
-          row.getCell(28).value = rec.questionario;
-          row.getCell(29).value = {
-            formula: `IF(((X${r}<>"N.A")*$X$2+(AA${r}<>"N.A")*$AA$2+(AB${r}<>"N.A")*$AB$2)=0,0,SUM($X$2,$AA$2,$AB$2)*((X${r}="Sim")*$X$2+(AA${r}="Sim")*$AA$2+(AB${r}="Sim")*$AB$2)/((X${r}<>"N.A")*$X$2+(AA${r}<>"N.A")*$AA$2+(AB${r}<>"N.A")*$AB$2))`
-          };
-
-          // Técnico
-          row.getCell(30).value = rec.procTecnicos;
-          row.getCell(31).value = rec.autonomias;
-          row.getCell(32).value = rec.registos;
-          row.getCell(33).value = {
-            formula: `IF(((AD${r}<>"N.A")*$AD$2+(AE${r}<>"N.A")*$AE$2+(AF${r}<>"N.A")*$AF$2)=0,0,SUM($AD$2:$AF$2)*((AD${r}="Sim")*$AD$2+(AE${r}="Sim")*$AE$2+(AF${r}="Sim")*$AF$2)/((AD${r}<>"N.A")*$AD$2+(AE${r}<>"N.A")*$AE$2+(AF${r}<>"N.A")*$AF$2))`
-          };
-
-          // Totais e Scores
-          row.getCell(34).value = { formula: `M${r}+AC${r}+W${r}+AG${r}` };
-          row.getCell(35).value = { formula: `M${r}/$M$2` };
-          row.getCell(36).value = { formula: `W${r}/$W$2` };
-          row.getCell(37).value = { formula: `AC${r}/$AC$2` };
-          row.getCell(38).value = { formula: `AG${r}/$AG$2` };
-
-          // Extras
-          row.getCell(39).value = rec.matricula;
-          row.getCell(40).value = ""; // Cartão Médis não consta no extrato
-          row.getCell(41).value = rec.obs;
-
-          row.commit();
-        });
-
-        const outBuf = await destWb.xlsx.writeBuffer();
-        const blob = new Blob([outBuf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        const today = new Date().toISOString().slice(0, 10);
-        a.href = url;
-        a.download = `Grelha_SINISTROS_${today}.xlsx`;
-        a.click();
-        URL.revokeObjectURL(url);
-
-        log.textContent = `Pronto! ${records.length} avaliações exportadas para Grelha_SINISTROS_${today}.xlsx.`;
-      } catch (err) {
-        log.textContent = "Erro: " + err.message;
-      }
-    });
-  </script>
-</body>
-</html>
