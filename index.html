@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Conversor 2MARES → Grelha SINISTROS</title>
+  <!-- Se o firewall da empresa bloquear CDN, baixe exceljs.min.js na mesma pasta e troque o src para "./exceljs.min.js" -->
+  <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+  <style>
+    * { box-sizing: border-box; font-family: "Segoe UI", system-ui, sans-serif; }
+    body { background: #f4f6f9; color: #1f2937; margin: 0; padding: 32px 16px; }
+    .card { max-width: 760px; margin: 0 auto; background: #fff; border-radius: 12px; padding: 28px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
+    h1 { margin: 0 0 6px; font-size: 22px; color: #111827; }
+    .sub { margin: 0 0 24px; color: #6b7280; font-size: 14px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
+    .drop { border: 2px dashed #cbd5e1; border-radius: 10px; padding: 20px; text-align: center; cursor: pointer; transition: .2s; background: #f8fafc; }
+    .drop:hover, .drop.drag { border-color: #2563eb; background: #eff6ff; }
+    .drop.ok { border-color: #16a34a; background: #f0fdf4; }
+    .drop strong { display: block; margin-bottom: 6px; font-size: 14px; }
+    .drop span { font-size: 12px; color: #64748b; word-break: break-word; }
+    input[type="file"] { display: none; }
+    .box { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px 16px; margin-bottom: 18px; display: none; }
+    .box h3 { margin: 0 0 10px; font-size: 14px; }
+    .chk { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 13px; }
+    .badge { font-size: 11px; padding: 2px 7px; border-radius: 999px; font-weight: 600; }
+    .badge.sin { background: #dcfce7; color: #166534; }
+    .badge.srv { background: #fee2e2; color: #991b1b; }
+    .opts { margin-bottom: 18px; font-size: 13px; color: #374151; }
+    button { width: 100%; padding: 13px; border: 0; border-radius: 8px; background: #2563eb; color: #fff; font-size: 15px; font-weight: 600; cursor: pointer; }
+    button:disabled { background: #94a3b8; cursor: not-allowed; }
+    #log { margin-top: 16px; font-size: 13px; white-space: pre-line; color: #334155; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Conversor Automático — Aba SINISTROS</h1>
+    <p class="sub">Processamento 100% local no navegador. Nenhum dado sai do computador.</p>
+
+    <div class="grid">
+      <label class="drop" id="dropSrc">
+        <strong>1. Relatório Extraído (.xlsx)</strong>
+        <span id="lblSrc">Clique ou arraste o arquivo do sistema</span>
+        <input type="file" id="fileSrc" accept=".xlsx" />
+      </label>
+
+      <label class="drop" id="dropTpl">
+        <strong>2. Grelha Molde (.xlsx)</strong>
+        <span id="lblTpl">Clique ou arraste a Grelha Manual</span>
+        <input type="file" id="fileTpl" accept=".xlsx" />
+      </label>
+    </div>
+
+    <div class="box" id="blocksBox">
+      <h3>Formulários detectados no extrato (marque os que entram em SINISTROS):</h3>
+      <div id="blocksList"></div>
+    </div>
+
+    <div class="opts">
+      <label class="chk">
+        <input type="checkbox" id="chkObs" />
+        Preencher coluna "Observações" com "Áreas de melhora" do extrato
+      </label>
+    </div>
+
+    <button id="btnRun" disabled>Gerar Excel Consolidado (SINISTROS)</button>
+    <div id="log"></div>
+  </div>
+
+  <script>
+    let srcBuffer = null, tplBuffer = null, detectedBlocks = [], srcWorkbook = null;
+
+    const norm = (v) => {
+      if (v === null || v === undefined) return "";
+      return String(v).normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase().replace(/\s+/g, " ");
+    };
+
+    const cellText = (cell) => {
+      const v = cell ? cell.value : null;
+      if (v === null || v === undefined) return "";
+      if (typeof v === "object") {
+        if (v.richText) return v.richText.map(t => t.text).join("").trim();
+        if (v.result !== undefined) return String(v.result ?? "").trim();
+        if (v.text !== undefined) return String(v.text ?? "").trim();
+        return "";
+      }
+      return String(v).trim();
+    };
+
+    const normAnswer = (v) => {
+      const s = String(v || "").trim();
+      const u = s.toUpperCase();
+      if (!s) return "";
+      if (u === "N/A" || u === "NA" || u === "N.A" || u === "N.A.") return "N.A";
+      if (u === "NAO" || u === "NÃO") return "Nao";
+      if (u === "SIM") return "Sim";
+      return s;
+    };
+
+    const findCol = (colMap, candidates) => {
+      for (const cand of candidates) {
+        if (colMap[cand]) return colMap[cand];
+      }
+      const keys = Object.keys(colMap);
+      for (const cand of candidates) {
+        const hit = keys.find(k => k.includes(cand));
+        if (hit) return colMap[hit];
+      }
+      return null;
+    };
+
+    function setupDrop(dropId, inputId, lblId, onFile) {
+      const drop = document.getElementById(dropId);
+      const input = document.getElementById(inputId);
+      const lbl = document.getElementById(lblId);
+
+      const handle = async (file) => {
+        if (!file) return;
+        lbl.textContent = file.name;
+        drop.classList.add("ok");
+        await onFile(file);
+        updateButton();
+      };
+
+      input.addEventListener("change", (e) => handle(e.target.files[0]));
+      drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("drag"); });
+      drop.addEventListener("dragleave", () => drop.classList.remove("drag"));
+      drop.addEventListener("drop", (e) => {
+        e.preventDefault();
+        drop.classList.remove("drag");
+        handle(e.dataTransfer.files[0]);
+      });
+    }
+
+    function updateButton() {
+      const anyChecked = detectedBlocks.some((_, i) => {
+        const el = document.getElementById("blk_" + i);
+        return el && el.checked;
+      });
+      document.getElementById("btnRun").disabled = !(srcBuffer && tplBuffer && anyChecked);
+    }
+
+    setupDrop("dropSrc", "fileSrc", "lblSrc", async (file) => {
+      srcBuffer = await file.arrayBuffer();
+      srcWorkbook = new ExcelJS.Workbook();
+      await srcWorkbook.xlsx.load(srcBuffer);
+
+      const ws = srcWorkbook.worksheets[0];
+      detectedBlocks = [];
+
+      for (let r = 1; r <= ws.rowCount; r++) {
+        if (norm(cellText(ws.getRow(r).getCell(2))) === "data monitoracao") {
+          let formName = "(Sem nome)";
+          for (let back = 1; back <= 10; back++) {
+            if (r - back >= 1 && norm(cellText(ws.getRow(r - back).getCell(2))).startsWith("formulario")) {
+              formName = cellText(ws.getRow(r - back).getCell(3)) || "(Sem nome)";
+              break;
+            }
+          }
+
+          const dataRows = [];
+          for (let curr = r + 1; curr <= ws.rowCount; curr++) {
+            const bVal = norm(cellText(ws.getRow(curr).getCell(2)));
+            if (!bVal || bVal === "total" || bVal.startsWith("formulario")) break;
+            dataRows.push(curr);
+          }
+
+          const colMap = {};
+          let hasConhecimentoProduto = false;
+          for (let c = 2; c <= ws.columnCount; c++) {
+            const h5 = norm(cellText(ws.getRow(r).getCell(c)));
+            const h4 = norm(cellText(ws.getRow(r - 1).getCell(c)));
+            const h3 = norm(cellText(ws.getRow(r - 2).getCell(c)));
+            const h2 = norm(cellText(ws.getRow(r - 3).getCell(c)));
+
+            if (h4.includes("conhecimento produto") || h3.includes("conhecimento produto")) {
+              hasConhecimentoProduto = true;
+            }
+            if (["avaliador/a", "elemento avaliado", "pontos fortes", "areas de melhora"].includes(h5)) {
+              colMap[h5] = c;
+            } else if (h5 === "resultado") {
+              const key = h4 || h2;
+              if (key && !colMap[key]) colMap[key] = c;
+            }
+          }
+
+          const isServicing = norm(formName).includes("servicing") || hasConhecimentoProduto;
+          detectedBlocks.push({ formName, dataRows, colMap, isServicing });
+        }
+      }
+
+      const box = document.getElementById("blocksBox");
+      const list = document.getElementById("blocksList");
+      list.innerHTML = "";
+      detectedBlocks.forEach((b, i) => {
+        const div = document.createElement("label");
+        div.className = "chk";
+        div.innerHTML = `
+          <input type="checkbox" id="blk_${i}" ${b.isServicing ? "" : "checked"} />
+          <span><strong>${b.formName}</strong> — ${b.dataRows.length} avaliações</span>
+          <span class="badge ${b.isServicing ? "srv" : "sin"}">${b.isServicing ? "SERVICING (ignorado)" : "SINISTROS"}</span>
+        `;
+        div.querySelector("input").addEventListener("change", updateButton);
+        list.appendChild(div);
+      });
+      box.style.display = "block";
+      document.getElementById("log").textContent = `Extrato lido: ${detectedBlocks.length} bloco(s) encontrado(s).`;
+    });
+
+    setupDrop("dropTpl", "fileTpl", "lblTpl", async (file) => {
+      tplBuffer = await file.arrayBuffer();
+      document.getElementById("log").textContent = "Grelha molde carregada.";
+    });
+
+    document.getElementById("btnRun").addEventListener("click", async () => {
+      const log = document.getElementById("log");
+      try {
+        log.textContent = "Processando...";
+        const srcWs = srcWorkbook.worksheets[0];
+        const fillObs = document.getElementById("chkObs").checked;
+
+        const records = [];
+        detectedBlocks.forEach((b, idx) => {
+          if (!document.getElementById("blk_" + idx).checked) return;
+          const m = b.colMap;
+          const get = (row, cands) => {
+            const col = findCol(m, cands);
+            return col ? cellText(row.getCell(col)) : "";
+          };
+
+          for (const rNum of b.dataRows) {
+            const row = srcWs.getRow(rNum);
+            records.push({
+              avaliador: get(row, ["avaliador/a"]).replace(/\s*-\s*$/, "").trim(),
+              idChamada: get(row, ["elemento avaliado"]),
+              user: get(row, ["user"]),
+              servico: get(row, ["servico"]),
+              marca: get(row, ["marca/template", "marca / template"]),
+              apresentacao: normAnswer(get(row, ["apresentacao"])),
+              idInterlocutor: normAnswer(get(row, ["identificacao do interlocutor"])),
+              personalizacao: normAnswer(get(row, ["personalizacao do contacto"])),
+              linguagem: normAnswer(get(row, ["linguagem correta"])),
+              naoInterrompe: normAnswer(get(row, ["deixa clinte falar", "deixa cliente falar"])),
+              despedida: normAnswer(get(row, ["despedida"])),
+              hold: normAnswer(get(row, ["gere tempo de hold", "silencios"])),
+              agradeceHold: normAnswer(get(row, ["agradece apos hold"])),
+              responde: normAnswer(get(row, ["responde ao cliente"])),
+              escuta: normAnswer(get(row, ["escuta eficaz"])),
+              transfere: normAnswer(get(row, ["transfere a chamada"])),
+              emocoes: normAnswer(get(row, ["gere emocoes"])),
+              maisAjuda: normAnswer(get(row, ["questiona necessidade de mais ajuda"])),
+              validacao: normAnswer(get(row, ["validacao de dados"])),
+              email: normAnswer(get(row, ["atualiza email"])),
+              telefone: normAnswer(get(row, ["atualiza telefone"])),
+              questionario: normAnswer(get(row, ["sugere questionario"])),
+              procTecnicos: normAnswer(get(row, ["procedimentos tecnicos/callcenter", "procedimentos tecnicos"])),
+              autonomias: normAnswer(get(row, ["cumpre autonomias"])),
+              registos: normAnswer(get(row, ["registos"])),
+              matricula: normAnswer(get(row, ["matricula", "refere matricula"])),
+              obs: fillObs ? get(row, ["areas de melhora"]) : ""
+            });
+          }
+        });
+
+        const destWb = new ExcelJS.Workbook();
+        await destWb.xlsx.load(tplBuffer);
+        destWb.calcProperties.fullCalcOnLoad = true;
+
+        const ws = destWb.getWorksheet("SINISTROS");
+        if (!ws) throw new Error('Aba "SINISTROS" não encontrada no arquivo molde.');
+
+        // Salva estilos e altura da linha 4 como padrão visual
+        const tplRow = ws.getRow(4);
+        const tplHeight = tplRow.height;
+        const tplStyles = [];
+        for (let c = 1; c <= 41; c++) {
+          tplStyles[c] = JSON.parse(JSON.stringify(tplRow.getCell(c).style || {}));
+        }
+
+        // Remove linhas antigas (da linha 4 em diante) para evitar restos de "Sim"
+        if (ws.rowCount >= 4) {
+          ws.spliceRows(4, ws.rowCount - 3);
+        }
+
+        records.forEach((rec, i) => {
+          const r = 4 + i;
+          const row = ws.getRow(r);
+          if (tplHeight) row.height = tplHeight;
+
+          for (let c = 1; c <= 41; c++) {
+            row.getCell(c).style = JSON.parse(JSON.stringify(tplStyles[c]));
+          }
+
+          row.getCell(1).value = rec.avaliador;
+          row.getCell(2).value = rec.idChamada;
+          row.getCell(3).value = rec.user;
+          row.getCell(4).value = rec.servico;
+          row.getCell(5).value = rec.marca;
+
+          // Comunicação
+          row.getCell(6).value = rec.apresentacao;
+          row.getCell(7).value = rec.idInterlocutor;
+          row.getCell(8).value = { formula: `IF(OR(F${r}="Nao",G${r}="Nao"),"Não",IF(OR(F${r}="Sim",G${r}="Sim"),"Sim","N.A"))` };
+          row.getCell(9).value = rec.personalizacao;
+          row.getCell(10).value = rec.linguagem;
+          row.getCell(11).value = rec.naoInterrompe;
+          row.getCell(12).value = rec.despedida;
+          row.getCell(13).value = {
+            formula: `IF(((H${r}<>"N.A")*$H$2+(I${r}<>"N.A")*$I$2+(J${r}<>"N.A")*$J$2+(K${r}<>"N.A")*$K$2+(L${r}<>"N.A")*$L$2)=0,0,SUM($H$2:$L$2)*((H${r}="Sim")*$H$2+(I${r}="Sim")*$I$2+(J${r}="Sim")*$J$2+(K${r}="Sim")*$K$2+(L${r}="Sim")*$L$2)/((H${r}<>"N.A")*$H$2+(I${r}<>"N.A")*$I$2+(J${r}<>"N.A")*$J$2+(K${r}<>"N.A")*$K$2+(L${r}<>"N.A")*$L$2))`
+          };
+
+          // Eficácia
+          row.getCell(14).value = rec.hold;
+          row.getCell(15).value = rec.agradeceHold;
+          row.getCell(16).value = { formula: `IF(OR(N${r}="Nao",O${r}="Nao"),"Não",IF(OR(N${r}="Sim",O${r}="Sim"),"Sim","N.A"))` };
+          row.getCell(17).value = rec.responde;
+          row.getCell(18).value = rec.escuta;
+          row.getCell(19).value = { formula: `IF(OR(Q${r}="Nao",R${r}="Nao"),"Não",IF(OR(Q${r}="Sim",R${r}="Sim"),"Sim","N.A"))` };
+          row.getCell(20).value = rec.transfere;
+          row.getCell(21).value = rec.emocoes;
+          row.getCell(22).value = rec.maisAjuda;
+          row.getCell(23).value = {
+            formula: `IF(((P${r}<>"N.A")*$P$2+(S${r}<>"N.A")*$S$2+(T${r}<>"N.A")*$T$2+(U${r}<>"N.A")*$U$2+(V${r}<>"N.A")*$V$2)=0,0,SUM($P$2,$S$2,$T$2,$U$2,$V$2)*((P${r}="Sim")*$P$2+(S${r}="Sim")*$S$2+(T${r}="Sim")*$T$2+(U${r}="Sim")*$U$2+(V${r}="Sim")*$V$2)/((P${r}<>"N.A")*$P$2+(S${r}<>"N.A")*$S$2+(T${r}<>"N.A")*$T$2+(U${r}<>"N.A")*$U$2+(V${r}<>"N.A")*$V$2))`
+          };
+
+          // Procedimentos
+          row.getCell(24).value = rec.validacao;
+          row.getCell(25).value = rec.email;
+          row.getCell(26).value = rec.telefone;
+          row.getCell(27).value = { formula: `IF(OR(Y${r}="Nao",Z${r}="Nao"),"Não",IF(OR(Y${r}="Sim",Z${r}="Sim"),"Sim","N.A"))` };
+          row.getCell(28).value = rec.questionario;
+          row.getCell(29).value = {
+            formula: `IF(((X${r}<>"N.A")*$X$2+(AA${r}<>"N.A")*$AA$2+(AB${r}<>"N.A")*$AB$2)=0,0,SUM($X$2,$AA$2,$AB$2)*((X${r}="Sim")*$X$2+(AA${r}="Sim")*$AA$2+(AB${r}="Sim")*$AB$2)/((X${r}<>"N.A")*$X$2+(AA${r}<>"N.A")*$AA$2+(AB${r}<>"N.A")*$AB$2))`
+          };
+
+          // Técnico
+          row.getCell(30).value = rec.procTecnicos;
+          row.getCell(31).value = rec.autonomias;
+          row.getCell(32).value = rec.registos;
+          row.getCell(33).value = {
+            formula: `IF(((AD${r}<>"N.A")*$AD$2+(AE${r}<>"N.A")*$AE$2+(AF${r}<>"N.A")*$AF$2)=0,0,SUM($AD$2:$AF$2)*((AD${r}="Sim")*$AD$2+(AE${r}="Sim")*$AE$2+(AF${r}="Sim")*$AF$2)/((AD${r}<>"N.A")*$AD$2+(AE${r}<>"N.A")*$AE$2+(AF${r}<>"N.A")*$AF$2))`
+          };
+
+          // Totais e Scores
+          row.getCell(34).value = { formula: `M${r}+AC${r}+W${r}+AG${r}` };
+          row.getCell(35).value = { formula: `M${r}/$M$2` };
+          row.getCell(36).value = { formula: `W${r}/$W$2` };
+          row.getCell(37).value = { formula: `AC${r}/$AC$2` };
+          row.getCell(38).value = { formula: `AG${r}/$AG$2` };
+
+          // Extras
+          row.getCell(39).value = rec.matricula;
+          row.getCell(40).value = ""; // Cartão Médis não consta no extrato
+          row.getCell(41).value = rec.obs;
+
+          row.commit();
+        });
+
+        const outBuf = await destWb.xlsx.writeBuffer();
+        const blob = new Blob([outBuf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        const today = new Date().toISOString().slice(0, 10);
+        a.href = url;
+        a.download = `Grelha_SINISTROS_${today}.xlsx`;
+        a.click();
+        URL.revokeObjectURL(url);
+
+        log.textContent = `Pronto! ${records.length} avaliações exportadas para Grelha_SINISTROS_${today}.xlsx.`;
+      } catch (err) {
+        log.textContent = "Erro: " + err.message;
+      }
+    });
+  </script>
+</body>
+</html>
